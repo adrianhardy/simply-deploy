@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="test" basedir="." default="deploy">
+   
+   <target name="check">
+    
+        <!-- check that the git repo exists, do we have a working copy, can we stat it or wahtever -->       
+        <if>
+            <not>
+                <equals arg1="${phing.dir}" arg2="${application.startdir}"/>
+            </not>
+            <then>
+                <echo msg="Please run this script from within ${phing.dir}" level="error" />
+                <fail></fail>
+            </then>
+        </if>
+        
+   </target>
+   
+    <property file="build.properties" />
+    <taskdef name="filesync" classname="phing.tasks.ext.FileSyncTask" />
+           
+    <target name="package" hidden="true" depends="check">
+        <!-- fetch some info from git about the tags and remote -->
+        <exec command="git tag | tail -n 1" outputProperty="tag" checkreturn="true" />
+        <exec command="git config --get remote.${deploy.repo.remotename}.url" outputProperty="remoteurl" checkreturn="true" />
+        
+        <echo msg="Packaging ${deploy.repo.name}-${tag} from ${remoteurl} ... " />
+      
+        <property name="payload.filename" value="${payload.package}.tar.bz2" />        
+        <property name="payload.package" value="${deploy.repo.name}-${tag}" />
+        
+        <if>
+            <not>
+                <available file="${payload.filename}" />
+            </not>
+            <then>
+                <exec command="git archive --remote ${remoteurl} ${tag} | bzip2 > ${payload.filename}" />       
+                <echo msg="Created package: ${payload.filename}" />                
+            </then>
+            <else>
+                <echo msg="Package already exists: ${payload.filename}" />                
+            </else>
+        </if>
+  
+    </target>
+    
+    <target name="deploy" depends="package">
+
+        <echo msg="Creating temporary directory on remote host ..." />        
+        <exec executable="ssh" level="debug" checkreturn="true" outputProperty="deploy.tmpdir">
+            <arg line="${deploy.ssh.username}@${deploy.ssh.hostname}" />
+            <arg line="-- " />
+            <arg line="mktemp -d /tmp/deploy-XXXXXXX" />
+        </exec>                
+
+        <echo msg="Creating temporary directory on local host ..." />      
+	<exec executable="mktemp" outputProperty="deploy.local.tmpdir">
+		<arg line="-d /tmp/deploy-XXXXXXXX" />
+	</exec>
+
+        <property name="deploy.script"><![CDATA[cat > ./install.sh <<EOT
+# make the project directory if necessary            
+[ ! -d "${deploy.path}" ] && mkdir -p ${deploy.path}
+# untar 
+tar -jxvf "${deploy.tmpdir}/${payload.filename}" -C "${deploy.tmpdir}"
+# remove the tarball
+rm "${deploy.tmpdir}/${payload.filename}"
+rsync -a --remove-source-files --exclude="./install.sh" "${deploy.tmpdir}/" "${deploy.path}/${payload.package}/"
+# Detect current symlink and remove it
+[ -L "${deploy.path}/current" ] && rm "${deploy.path}/current"
+# Symlink package just moved into place into "current"
+ln -s "${deploy.path}/${payload.package}" "${deploy.path}/current"
+EOT
+]]></property>        
+
+ 	<echo msg="Creating install script ..." />
+        <exec command="${deploy.script}" escape="false" logoutput="true" />
+
+	<move file="./install.sh" todir="${deploy.local.tmpdir}" />
+	<copy file="${payload.filename}" todir="${deploy.local.tmpdir}" />
+
+	<echo msg="Uploading payload to remote location ..." />        
+	<exec executable="rsync" level="debug" checkreturn="true" logoutput="true">
+	    <arg line="-a" />
+	    <arg line="--remove-source-files" />
+	    <arg file="${deploy.local.tmpdir}/*" />        
+	    <arg line="${deploy.ssh.username}@${deploy.ssh.hostname}:${deploy.tmpdir}/" />
+	</exec>
+      
+	<echo msg="Tidying up ..." /> 
+	<exec executable="rmdir">
+		<arg line="${deploy.local.tmpdir}" />
+	</exec>
+
+	<echo msg="Installing ..." /> 
+	<exec executable="ssh">
+		<arg line="${deploy.ssh.username}@${deploy.ssh.hostname}" />
+		<arg line="sh ${deploy.tmpdir}/install.sh" />
+	</exec>
+
+	<echo msg="Removing install file" /> 
+	<exec executable="ssh">
+		<arg line="${deploy.ssh.username}@${deploy.ssh.hostname}" />
+		<arg line="rm ${deploy.tmpdir}/install.sh" />
+	</exec>
+
+	<echo msg="Removing deploy directory" /> 
+	<exec executable="ssh">
+		<arg line="${deploy.ssh.username}@${deploy.ssh.hostname}" />
+		<arg line="rmdir ${deploy.tmpdir}" />
+	</exec>
+
+ 
+    </target>
+ 
+</project>
